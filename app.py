@@ -1,11 +1,13 @@
 import re
 import sqlite3
 from datetime import datetime
-from io import StringIO
+from io import StringIO, BytesIO
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill
 
 DB_PATH = "data_manager.db"
 
@@ -120,7 +122,62 @@ def clean_dataframe(
     return cleaned
 
 
-def save_snapshot(name: str, stage: str, df: pd.DataFrame) -> None:
+def filter_dataframe(df: pd.DataFrame, search_text: str = "", filters: dict = None) -> pd.DataFrame:
+    """Filter dataframe by text search and column-specific criteria"""
+    filtered = df.copy()
+    
+    # Text search across all columns
+    if search_text.strip():
+        mask = filtered.astype(str).apply(
+            lambda x: x.str.contains(search_text, case=False, na=False)
+        ).any(axis=1)
+        filtered = filtered[mask]
+    
+    # Column-specific filters
+    if filters:
+        for col, criteria in filters.items():
+            if col not in filtered.columns:
+                continue
+            
+            col_type = filtered[col].dtype
+            
+            if isinstance(criteria, dict) and "min" in criteria and "max" in criteria:
+                # Numeric range filter
+                filtered = filtered[
+                    (filtered[col] >= criteria["min"]) & 
+                    (filtered[col] <= criteria["max"])
+                ]
+            elif isinstance(criteria, list) and criteria:
+                # Categorical filter (selected values)
+                filtered = filtered[filtered[col].isin(criteria)]
+    
+    return filtered.reset_index(drop=True)
+
+
+def export_to_excel(df: pd.DataFrame, filename: str) -> BytesIO:
+    """Export dataframe to Excel with formatting"""
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Data")
+        
+        worksheet = writer.sheets["Data"]
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        header_font = Font(bold=True, color="FFFFFF")
+        
+        for cell in worksheet[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+        
+        for column in worksheet.columns:
+            max_length = 30
+            column_letter = column[0].column_letter
+            worksheet.column_dimensions[column_letter].width = min(max_length, 50)
+    
+    output.seek(0)
+    return output
+
+
+
     payload = df.to_json(orient="split", date_format="iso")
     with get_connection() as conn:
         conn.execute(
@@ -344,15 +401,88 @@ def main() -> None:
                 metric_b.metric("Cleaned rows", cleaned_df.shape[0])
                 metric_c.metric("Columns", cleaned_df.shape[1])
 
-                st.dataframe(cleaned_df.head(50), use_container_width=True)
+                st.subheader("4) Search & Filter")
+                with st.expander("🔍 Search and Filter Options", expanded=False):
+                    search_col, filter_col = st.columns(2)
+                    
+                    with search_col:
+                        search_text = st.text_input("Search across all columns", "")
+                    
+                    with filter_col:
+                        st.write("")  # Spacing
+                    
+                    # Column-specific filters
+                    filters = {}
+                    numeric_cols = cleaned_df.select_dtypes(include="number").columns.tolist()
+                    categorical_cols = cleaned_df.select_dtypes(include=["object", "string"]).columns.tolist()
+                    
+                    if numeric_cols:
+                        st.write("**Numeric Filters:**")
+                        for col in numeric_cols[:3]:  # Limit to first 3
+                            min_val, max_val = st.slider(
+                                f"{col}",
+                                min_value=float(cleaned_df[col].min()),
+                                max_value=float(cleaned_df[col].max()),
+                                value=(float(cleaned_df[col].min()), float(cleaned_df[col].max())),
+                                key=f"slider_{col}"
+                            )
+                            filters[col] = {"min": min_val, "max": max_val}
+                    
+                    if categorical_cols:
+                        st.write("**Category Filters:**")
+                        for col in categorical_cols[:2]:  # Limit to first 2
+                            unique_vals = cleaned_df[col].fillna("Unknown").unique().tolist()
+                            selected_vals = st.multiselect(
+                                f"{col}",
+                                options=unique_vals,
+                                default=unique_vals,
+                                key=f"multiselect_{col}"
+                            )
+                            if selected_vals:
+                                filters[col] = selected_vals
+                    
+                    apply_filter = st.button("Apply Filters", key="apply_filters")
+                
+                # Apply filters
+                if apply_filter or search_text:
+                    filtered_df = filter_dataframe(cleaned_df, search_text, filters)
+                    st.session_state["filtered_df"] = filtered_df
+                    st.info(f"Filtered: {filtered_df.shape[0]} of {cleaned_df.shape[0]} rows")
+                else:
+                    st.session_state["filtered_df"] = cleaned_df
+                
+                display_df = st.session_state["filtered_df"]
+                st.dataframe(display_df.head(50), use_container_width=True)
 
-                csv_data = cleaned_df.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    "Download cleaned CSV",
-                    data=csv_data,
-                    file_name=f"{dataset_name}_cleaned.csv",
-                    mime="text/csv",
-                )
+                st.subheader("5) Export Data")
+                export_col1, export_col2, export_col3 = st.columns(3)
+                
+                with export_col1:
+                    csv_data = display_df.to_csv(index=False).encode("utf-8")
+                    st.download_button(
+                        "📥 Download CSV",
+                        data=csv_data,
+                        file_name=f"{dataset_name}_export.csv",
+                        mime="text/csv",
+                    )
+                
+                with export_col2:
+                    excel_file = export_to_excel(display_df, f"{dataset_name}_export.xlsx")
+                    st.download_button(
+                        "📊 Download Excel",
+                        data=excel_file,
+                        file_name=f"{dataset_name}_export.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                
+                with export_col3:
+                    cleaned_csv = cleaned_df.to_csv(index=False).encode("utf-8")
+                    st.download_button(
+                        "💾 Save as Raw CSV",
+                        data=cleaned_csv,
+                        file_name=f"{dataset_name}_cleaned.csv",
+                        mime="text/csv",
+                    )
 
                 col_save, _ = st.columns([1, 4])
                 with col_save:
