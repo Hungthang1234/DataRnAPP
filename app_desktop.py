@@ -7,6 +7,7 @@ from tkinter import ttk, filedialog, messagebox
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
+from data_cleaner import DataCleaner
 
 DB_PATH = "data_manager.db"
 
@@ -250,6 +251,11 @@ class DataManagerApp:
         tab3 = ttk.Frame(notebook)
         notebook.add(tab3, text="💾 Snapshots")
         self.setup_tab3(tab3)
+        
+        # Tab 4: Data Quality & Advanced Cleaning
+        tab4 = ttk.Frame(notebook)
+        notebook.add(tab4, text="🔍 Data Quality")
+        self.setup_tab4(tab4)
     
     def setup_tab1(self, tab):
         # File selection
@@ -554,41 +560,222 @@ class DataManagerApp:
                 row.get("email", ""), row.get("phone", "")
             ))
     
+    def setup_tab4(self, tab):
+        """Data Quality & Advanced Cleaning Tab"""
+        # Quality report section
+        frame_quality = ttk.LabelFrame(tab, text="Data Quality Analysis", padding=10)
+        frame_quality.pack(fill="x", padx=5, pady=5)
+        
+        tk.Button(frame_quality, text="Generate Quality Report", command=self.generate_quality_report).pack(side="left", padx=5)
+        tk.Button(frame_quality, text="Detect Outliers (IQR)", command=self.detect_outliers_iqr).pack(side="left", padx=5)
+        tk.Button(frame_quality, text="Detect Outliers (Z-Score)", command=self.detect_outliers_zscore).pack(side="left", padx=5)
+        
+        # Advanced cleaning options
+        frame_advanced = ttk.LabelFrame(tab, text="Advanced Cleaning Options", padding=10)
+        frame_advanced.pack(fill="x", padx=5, pady=5)
+        
+        self.clean_remove_dup = tk.BooleanVar(value=True)
+        self.clean_whitespace = tk.BooleanVar(value=True)
+        self.clean_standardize = tk.BooleanVar(value=True)
+        
+        tk.Checkbutton(frame_advanced, text="Remove duplicates", variable=self.clean_remove_dup).pack(side="left")
+        tk.Checkbutton(frame_advanced, text="Clean whitespace", variable=self.clean_whitespace).pack(side="left")
+        tk.Checkbutton(frame_advanced, text="Standardize column names", variable=self.clean_standardize).pack(side="left")
+        
+        tk.Label(frame_advanced, text="Handle missing:").pack(side="left", padx=10)
+        self.clean_missing_strategy = tk.StringVar(value="fill")
+        ttk.Combobox(frame_advanced, textvariable=self.clean_missing_strategy,
+                    values=["report", "fill", "drop", "drop_cols"],
+                    state="readonly", width=15).pack(side="left")
+        
+        tk.Button(frame_advanced, text="Run Full Cleaning", command=self.run_full_cleaning).pack(side="left", padx=10)
+        
+        # Results text area
+        frame_results = ttk.LabelFrame(tab, text="Cleaning Results", padding=5)
+        frame_results.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        self.results_text = tk.Text(frame_results, height=15, width=80)
+        scrollbar = ttk.Scrollbar(frame_results, orient="vertical", command=self.results_text.yview)
+        
+        self.results_text.configure(yscroll=scrollbar.set)
+        self.results_text.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        self.quality_status = tk.Label(tab, text="Ready for analysis", fg="blue")
+        self.quality_status.pack(fill="x", padx=10, pady=5)
+    
+    def generate_quality_report(self):
+        if self.current_df.empty:
+            messagebox.showwarning("Warning", "Please load data first")
+            return
+        
+        try:
+            cleaner = DataCleaner(self.current_df if self.cleaned_df.empty else self.cleaned_df)
+            report = cleaner.generate_quality_report()
+            
+            self.results_text.delete("1.0", "end")
+            self.results_text.insert("end", "=== DATA QUALITY REPORT ===\n\n")
+            
+            for col, info in report.items():
+                self.results_text.insert("end", f"{col}:\n")
+                self.results_text.insert("end", f"  Type: {info['dtype']}\n")
+                self.results_text.insert("end", f"  Non-null: {info['non_null']}/{len(self.current_df)}\n")
+                self.results_text.insert("end", f"  Missing: {info['null_count']} ({info['null_percent']}%)\n")
+                self.results_text.insert("end", f"  Unique values: {info['unique_values']}\n")
+                self.results_text.insert("end", f"  Duplicates: {info['duplicates']}\n\n")
+            
+            self.quality_status.config(text="✓ Quality report generated", fg="green")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to generate report: {e}")
+    
+    def detect_outliers_iqr(self):
+        if self.current_df.empty:
+            messagebox.showwarning("Warning", "Please load data first")
+            return
+        
+        try:
+            cleaner = DataCleaner(self.current_df if self.cleaned_df.empty else self.cleaned_df)
+            report = cleaner.detect_outliers(method="iqr")
+            
+            self.results_text.delete("1.0", "end")
+            self.results_text.insert("end", "=== OUTLIER DETECTION (IQR METHOD) ===\n\n")
+            
+            if not report:
+                self.results_text.insert("end", "No numeric columns found or no outliers detected.")
+            else:
+                for col, info in report.items():
+                    self.results_text.insert("end", f"{col}:\n")
+                    self.results_text.insert("end", f"  Method: {info['method']}\n")
+                    self.results_text.insert("end", f"  Outliers found: {info['outlier_count']} ({info['outlier_percent']}%)\n")
+                    self.results_text.insert("end", f"  Bounds: [{info['bounds']['lower']}, {info['bounds']['upper']}]\n")
+                    self.results_text.insert("end", f"  Sample values: {info['values']}\n\n")
+            
+            self.quality_status.config(text="✓ Outliers detected (IQR)", fg="green")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to detect outliers: {e}")
+    
+    def detect_outliers_zscore(self):
+        if self.current_df.empty:
+            messagebox.showwarning("Warning", "Please load data first")
+            return
+        
+        try:
+            cleaner = DataCleaner(self.current_df if self.cleaned_df.empty else self.cleaned_df)
+            report = cleaner.detect_outliers(method="zscore")
+            
+            self.results_text.delete("1.0", "end")
+            self.results_text.insert("end", "=== OUTLIER DETECTION (Z-SCORE METHOD) ===\n\n")
+            
+            if not report:
+                self.results_text.insert("end", "No numeric columns found or no outliers detected.")
+            else:
+                for col, info in report.items():
+                    self.results_text.insert("end", f"{col}:\n")
+                    self.results_text.insert("end", f"  Method: {info['method']}\n")
+                    self.results_text.insert("end", f"  Outliers found: {info['outlier_count']} ({info['outlier_percent']}%)\n")
+                    self.results_text.insert("end", f"  Threshold (Z > {info['threshold']})\n")
+                    self.results_text.insert("end", f"  Sample values: {info['values']}\n\n")
+            
+            self.quality_status.config(text="✓ Outliers detected (Z-Score)", fg="green")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to detect outliers: {e}")
+    
+    def run_full_cleaning(self):
+        if self.current_df.empty:
+            messagebox.showwarning("Warning", "Please load data first")
+            return
+        
+        try:
+            cleaner = DataCleaner(self.current_df if self.cleaned_df.empty else self.cleaned_df)
+            
+            all_reports = cleaner.run_full_cleaning(
+                remove_duplicates=self.clean_remove_dup.get(),
+                handle_missing=self.clean_missing_strategy.get(),
+                remove_whitespace=self.clean_whitespace.get(),
+                standardize_names=self.clean_standardize.get()
+            )
+            
+            self.cleaned_df = cleaner.get_cleaned_data()
+            
+            self.results_text.delete("1.0", "end")
+            self.results_text.insert("end", "=== FULL CLEANING PIPELINE REPORT ===\n\n")
+            
+            # Standardize names
+            if "standardize_names" in all_reports:
+                self.results_text.insert("end", "Standardize Names:\n")
+                report = all_reports["standardize_names"]
+                self.results_text.insert("end", f"  Total renamed: {report['total_renamed']}\n")
+                self.results_text.insert("end", f"  Mappings: {report['renamed_columns']}\n\n")
+            
+            # Whitespace
+            if "whitespace" in all_reports:
+                self.results_text.insert("end", "Remove Whitespace:\n")
+                for col, info in all_reports["whitespace"].items():
+                    self.results_text.insert("end", f"  {col}: {info['chars_removed']} chars removed\n")
+                self.results_text.insert("end", "\n")
+            
+            # Duplicates
+            if "duplicates" in all_reports:
+                self.results_text.insert("end", "Remove Duplicates:\n")
+                report = all_reports["duplicates"]
+                self.results_text.insert("end", f"  Rows removed: {report['removed_rows']}\n")
+                self.results_text.insert("end", f"  Rows remaining: {report['remaining_rows']}\n")
+                self.results_text.insert("end", f"  Reduction: {report['percent_reduced']}%\n\n")
+            
+            # Missing values
+            if "missing_values" in all_reports:
+                self.results_text.insert("end", "Handle Missing Values:\n")
+                report = all_reports["missing_values"]
+                self.results_text.insert("end", f"  {report}\n\n")
+            
+            # Before/After
+            if "before_after" in all_reports:
+                self.results_text.insert("end", "Before/After Comparison:\n")
+                report = all_reports["before_after"]
+                self.results_text.insert("end", f"  Shape: {report['original_shape']} → {report['cleaned_shape']}\n")
+                self.results_text.insert("end", f"  Rows removed: {report['rows_removed']}\n")
+                self.results_text.insert("end", f"  Missing values reduced: {report['missing_reduced']}\n")
+            
+            self.show_data_in_table(self.cleaned_df)
+            self.quality_status.config(text=f"✓ Full cleaning completed | {self.current_df.shape[0]} → {self.cleaned_df.shape[0]} rows", fg="green")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to run cleaning: {e}")
+
     def delete_company(self):
         try:
-            comp_id = int(self.del_id.get())
-            delete_company(comp_id)
+            company_id = int(self.del_id.get())
+            delete_company(company_id)
             self.del_id.set("")
             self.refresh_companies()
-            messagebox.showinfo("Success", f"Company {comp_id} deleted!")
+            messagebox.showinfo("Success", f"Company #{company_id} deleted!")
         except ValueError:
             messagebox.showwarning("Warning", "Invalid company ID")
-    
+
     def refresh_snapshots(self):
         for item in self.snap_tree.get_children():
             self.snap_tree.delete(item)
-        
+
         snaps = list_snapshots()
         for snap in snaps:
             self.snap_tree.insert("", "end", values=(
-                snap["id"], snap["name"], snap["stage"], 
-                snap["created_at"][:10], snap["rows_count"], snap["cols_count"]
+                snap["id"], snap["name"], snap["stage"],
+                snap["created_at"][:10], snap["rows_count"], snap["cols_count"] 
             ))
-    
+
     def load_snap(self):
         try:
             snap_id = int(self.load_snap_id.get())
             self.current_df = load_snapshot(snap_id)
             self.show_data_in_table(self.current_df)
             self.load_snap_id.set("")
-            messagebox.showinfo("Success", f"Loaded snapshot #{snap_id}")
+            messagebox.showinfo("Success", f"Loaded snapshot #{snap_id}")       
         except ValueError:
             messagebox.showwarning("Warning", "Invalid snapshot ID")
 
 
 if __name__ == "__main__":
     import tkinter.simpledialog
-    
+
     root = tk.Tk()
     app = DataManagerApp(root)
     root.mainloop()
